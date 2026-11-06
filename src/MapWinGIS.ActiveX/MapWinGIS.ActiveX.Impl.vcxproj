@@ -47,8 +47,10 @@
 
   <ItemGroup>
     <ClInclude Include="ComConversion.h" />
+    <ClInclude Include="FrameBuffer.h" />
     <ClInclude Include="GdalOperationDispatcher.h" />
     <ClInclude Include="GdiVectorLayerRenderer.h" />
+    <ClInclude Include="LayerCache.h" />
     <ClInclude Include="OpenGlVectorLayerRenderer.h" />
     <ClInclude Include="VectorLayerRenderer.h" />
     <ClInclude Include="VectorRenderBackend.h" />
@@ -57,8 +59,10 @@
 
   <ItemGroup>
     <ClCompile Include="ComConversion.cpp" />
+    <ClCompile Include="FrameBuffer.cpp" />
     <ClCompile Include="GdalOperationDispatcher.cpp" />
     <ClCompile Include="GdiVectorLayerRenderer.cpp" />
+    <ClCompile Include="LayerCache.cpp" />
     <ClCompile Include="OpenGlVectorLayerRenderer.cpp" />
     <ClCompile Include="VectorLayerRenderer.cpp" />
     <ClCompile Include="ViewTransform.cpp" />

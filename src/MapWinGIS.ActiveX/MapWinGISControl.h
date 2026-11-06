@@ -19,7 +19,9 @@
 #include <atlctl.h>
 
 #include "mapwingis/map/MapView.h"
+#include "FrameBuffer.h"
 #include "GdalEventSource.h"
+#include "LayerCache.h"
 #include "VectorLayerRenderer.h"
 
 class ATL_NO_VTABLE CMapWinGISControl :
@@ -98,6 +100,7 @@ public:
         MESSAGE_HANDLER(WM_CANCELMODE, OnCancelMode)
         MESSAGE_HANDLER(WM_SIZE, OnSize)
         MESSAGE_HANDLER(WM_DESTROY, OnDestroy)
+        MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
         CHAIN_MSG_MAP(ATL::CComControl<CMapWinGISControl>)
     END_MSG_MAP()
 
@@ -149,6 +152,7 @@ public:
     LRESULT OnSize(UINT, WPARAM, LPARAM, BOOL& handled);
     LRESULT OnGdalDispatch(UINT, WPARAM, LPARAM, BOOL& handled);
     LRESULT OnDestroy(UINT, WPARAM, LPARAM, BOOL& handled);
+    LRESULT OnEraseBkgnd(UINT, WPARAM, LPARAM, BOOL& handled);
     static void DispatchGdalNotifications(void* control) noexcept;
     HRESULT OnDraw(ATL_DRAWINFO& drawInfo);
     ~CMapWinGISControl();
@@ -162,10 +166,17 @@ private:
     bool CaptureMouse() noexcept;
     void ReleaseMouseCapture() noexcept;
     void CancelMousePan() noexcept;
+    /// Ends a pan drag: when the view moved away from the cached frame,
+    /// drops the cache and requests the full render for the final view.
+    void EndShiftedPan();
     bool GetMousePoint(LPARAM lParam, bool screenCoordinates, POINT& point) const noexcept;
 
     mwg::MapView _view;
     LONGLONG _featureCount = 0;
+    mwg::activex::FrameBuffer _frameBuffer;
+    /// The last fully rendered client-area frame and the pixel pan offset
+    /// of the view relative to it; see LayerCache.h.
+    mwg::activex::LayerCache _layerCache;
     mwg::activex::VectorLayerRenderer _renderer;
     mwg::activex::GdalEventSource _gdalEvents;
     POINT _lastPanPoint{};

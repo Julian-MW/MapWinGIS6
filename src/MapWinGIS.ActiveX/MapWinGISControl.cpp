@@ -7,8 +7,13 @@
  *
  * Redraws: every map or view change made through the control goes through
  * its MapView; the control calls FireViewChange when the MapView reports
- * that the frame changed. OnDraw draws the MapView's render scene through
- * its viewport, so every layer uses the same transformation.
+ * that the frame changed. OnDraw composes the MapView's render scene
+ * through its viewport into an offscreen frame buffer and presents the
+ * finished frame with a single blit, so every layer uses the same
+ * transformation and the visible surface never shows a partially drawn
+ * frame. Client-area frames are kept in a layer cache: while a left-drag
+ * pan is in progress the cached frame is presented shifted by the drag
+ * offset and the layers are re-rendered when the drag ends.
  */
 #include "MapWinGISControl.h"
 
@@ -468,6 +473,7 @@ HRESULT CMapWinGISControl::LoadVectorDatasetImpl(
         {
             *layerId = convertedId;
         }
+        _layerCache.Invalidate();
         FireViewChange();
         return S_OK;
     }
@@ -490,6 +496,7 @@ STDMETHODIMP CMapWinGISControl::ClearLayers()
     if (_view.ClearLayers())
     {
         _featureCount = 0;
+        _layerCache.Invalidate();
         FireViewChange();
     }
     return S_OK;
@@ -568,6 +575,7 @@ STDMETHODIMP CMapWinGISControl::put_RenderingBackendPreference(BSTR preference)
         return E_INVALIDARG;
     }
 
+    _layerCache.Invalidate();
     FireViewChange();
     return S_OK;
 }
@@ -580,6 +588,7 @@ STDMETHODIMP CMapWinGISControl::FitToMap()
         changed);
     if (SUCCEEDED(result) && changed)
     {
+        _layerCache.Invalidate();
         FireViewChange();
     }
     return result;
@@ -593,6 +602,7 @@ STDMETHODIMP CMapWinGISControl::ZoomIn(const DOUBLE factor)
         changed);
     if (SUCCEEDED(result) && changed)
     {
+        _layerCache.Invalidate();
         FireViewChange();
     }
     return result;
@@ -606,6 +616,7 @@ STDMETHODIMP CMapWinGISControl::ZoomOut(const DOUBLE factor)
         changed);
     if (SUCCEEDED(result) && changed)
     {
+        _layerCache.Invalidate();
         FireViewChange();
     }
     return result;
@@ -621,6 +632,7 @@ STDMETHODIMP CMapWinGISControl::Pan(
         changed);
     if (SUCCEEDED(result) && changed)
     {
+        _layerCache.Invalidate();
         FireViewChange();
     }
     return result;
@@ -640,6 +652,7 @@ STDMETHODIMP CMapWinGISControl::ZoomAt(
         changed);
     if (SUCCEEDED(result) && changed)
     {
+        _layerCache.Invalidate();
         FireViewChange();
     }
     return result;
@@ -663,6 +676,7 @@ STDMETHODIMP CMapWinGISControl::ZoomToLayer(const LONGLONG layerId)
         changed);
     if (SUCCEEDED(result) && changed)
     {
+        _layerCache.Invalidate();
         FireViewChange();
     }
     return result;
@@ -752,6 +766,19 @@ void CMapWinGISControl::CancelMousePan() noexcept
     }
 }
 
+void CMapWinGISControl::EndShiftedPan()
+{
+    const POINT offset = _layerCache.Offset();
+    if (offset.x != 0 || offset.y != 0)
+    {
+        // The drag moved the view away from the cached frame; draw the
+        // layers again so the revealed strips show the map, then reset the
+        // pan offset.
+        _layerCache.Invalidate();
+        FireViewChange();
+    }
+}
+
 bool CMapWinGISControl::GetMousePoint(
     const LPARAM lParam,
     const bool screenCoordinates,
@@ -819,7 +846,12 @@ LRESULT CMapWinGISControl::OnMouseMove(
 
     if ((wParam & MK_LBUTTON) == 0)
     {
+        const bool wasPanning = _isPanning;
         CancelMousePan();
+        if (wasPanning)
+        {
+            EndShiftedPan();
+        }
         handled = TRUE;
         return 0;
     }
@@ -858,6 +890,8 @@ LRESULT CMapWinGISControl::OnMouseMove(
         changed);
     if (SUCCEEDED(result) && changed)
     {
+        // The cached frame stays valid; the view only moves away from it.
+        _layerCache.Shift(pixelDeltaX, pixelDeltaY);
         FireViewChange();
     }
 
@@ -878,6 +912,7 @@ LRESULT CMapWinGISControl::OnLButtonUp(
     }
 
     CancelMousePan();
+    EndShiftedPan();
     handled = TRUE;
     return 0;
 }
@@ -915,6 +950,7 @@ LRESULT CMapWinGISControl::OnMouseWheel(
         changed);
     if (SUCCEEDED(result) && changed)
     {
+        _layerCache.Invalidate();
         FireViewChange();
     }
 
@@ -928,7 +964,12 @@ LRESULT CMapWinGISControl::OnCaptureChanged(
     LPARAM,
     BOOL& handled)
 {
-    _isPanning = false;
+    if (_isPanning)
+    {
+        // Stolen capture ends the pan without a button-up message.
+        _isPanning = false;
+        EndShiftedPan();
+    }
     handled = TRUE;
     return 0;
 }
@@ -939,7 +980,12 @@ LRESULT CMapWinGISControl::OnCancelMode(
     LPARAM,
     BOOL& handled)
 {
+    const bool wasPanning = _isPanning;
     CancelMousePan();
+    if (wasPanning)
+    {
+        EndShiftedPan();
+    }
     handled = TRUE;
     return 0;
 }
@@ -953,6 +999,7 @@ LRESULT CMapWinGISControl::OnSize(
     _gdalEvents.OnSize();
     if (ResizeView(LOWORD(lParam), HIWORD(lParam)))
     {
+        _layerCache.Invalidate();
         FireViewChange();
     }
     handled = TRUE;
@@ -1022,6 +1069,7 @@ STDMETHODIMP CMapWinGISControl::SetObjectRects(LPCRECT position, LPCRECT clip)
                 static_cast<LONG>(std::clamp<LONGLONG>(width, 0, mwg::Viewport::kMaxDimension)),
                 static_cast<LONG>(std::clamp<LONGLONG>(height, 0, mwg::Viewport::kMaxDimension))))
         {
+            _layerCache.Invalidate();
             FireViewChange();
         }
     }
@@ -1041,46 +1089,218 @@ HRESULT CMapWinGISControl::OnDraw(ATL_DRAWINFO& drawInfo)
         drawInfo.prcBounds->right,
         drawInfo.prcBounds->bottom};
 
-    if (::FillRect(
-            drawInfo.hdcDraw,
-            &bounds,
-            ::GetSysColorBrush(COLOR_WINDOW)) == 0)
-    {
-        return E_FAIL;
-    }
-
     const LONGLONG width = static_cast<LONGLONG>(bounds.right) - bounds.left;
     const LONGLONG height = static_cast<LONGLONG>(bounds.bottom) - bounds.top;
-    if (width <= 0 || height <= 0 ||
-        width > mwg::Viewport::kMaxDimension || height > mwg::Viewport::kMaxDimension)
+    const bool drawable = width > 0 && height > 0 &&
+        width <= mwg::Viewport::kMaxDimension && height <= mwg::Viewport::kMaxDimension;
+
+    // Compose the frame in an offscreen buffer and present it with a single
+    // blit, so the visible surface never shows the background erase or a
+    // partially drawn frame. Drawing straight to the target device context
+    // is the fallback for sizes the buffer cannot hold.
+    const bool buffered = drawable &&
+        _frameBuffer.Resize(
+            static_cast<int>(width),
+            static_cast<int>(height));
+    HDC frameDc = buffered ? _frameBuffer.Get() : drawInfo.hdcDraw;
+    RECT frameBounds = buffered
+        ? RECT{0, 0, static_cast<LONG>(width), static_cast<LONG>(height)}
+        : bounds;
+
+    // The layer cache serves client-area draws: the live viewport has the
+    // same size, so its frame can be reused while the view moves. Printing
+    // and scaled draws give the viewport snapshot another size and keep
+    // drawing straight to the presentation buffer.
+    const mwg::Viewport& liveViewport = _view.GetViewport();
+    const bool useCache = drawable &&
+        liveViewport.Width() == static_cast<int>(width) &&
+        liveViewport.Height() == static_cast<int>(height) &&
+        _layerCache.Resize(
+            static_cast<int>(width),
+            static_cast<int>(height));
+
+    // A pan drag with a moved view presents the cached frame shifted, with
+    // the exposed strips left in the background color.
+    const bool shifted = useCache && _isPanning &&
+        _layerCache.MatchesSize(
+            static_cast<int>(width),
+            static_cast<int>(height)) &&
+        (_layerCache.Offset().x != 0 || _layerCache.Offset().y != 0);
+
+    const auto renderFrame = [&](HDC sceneDc, const RECT& sceneBounds) -> HRESULT
     {
-        return S_OK;
-    }
-    try
-    {
-        const mwg::rendering::MapRenderScene& scene = _view.Scene();
-        // Printing and scaled draws use a snapshot, never the live viewport.
-        mwg::Viewport viewport = _view.GetViewport();
-        viewport.SetSize(static_cast<int>(width), static_cast<int>(height));
-        if (!viewport.HasView())
+        if (::FillRect(
+                sceneDc,
+                &sceneBounds,
+                ::GetSysColorBrush(COLOR_WINDOW)) == 0)
         {
-            (void)viewport.FitExtent(_view.GetMap().GetExtent(), mwg::MapView::kDefaultPadding);
+            return E_FAIL;
         }
-        if (scene.layers.empty() || !viewport.IsValid())
+
+        if (!drawable)
         {
             return S_OK;
         }
-        return _renderer.Draw(drawInfo.hdcDraw, bounds, scene, viewport);
-    }
-    catch (const std::bad_alloc&)
+
+        try
+        {
+            const mwg::rendering::MapRenderScene& scene = _view.Scene();
+            // Printing and scaled draws use a snapshot, never the live viewport.
+            mwg::Viewport viewport = _view.GetViewport();
+            viewport.SetSize(static_cast<int>(width), static_cast<int>(height));
+            if (!viewport.HasView())
+            {
+                (void)viewport.FitExtent(_view.GetMap().GetExtent(), mwg::MapView::kDefaultPadding);
+            }
+            if (!scene.layers.empty() && viewport.IsValid())
+            {
+                return _renderer.Draw(sceneDc, sceneBounds, scene, viewport);
+            }
+            return S_OK;
+        }
+        catch (const std::bad_alloc&)
+        {
+            return E_OUTOFMEMORY;
+        }
+        catch (const std::exception& exception)
+        {
+            ::OutputDebugStringA(exception.what());
+            return E_FAIL;
+        }
+    };
+
+    if (shifted)
     {
-        return E_OUTOFMEMORY;
+        if (!_layerCache.ComposeShifted(
+                frameDc,
+                static_cast<int>(width),
+                static_cast<int>(height)))
+        {
+            return E_FAIL;
+        }
+        if (!buffered || ::BitBlt(
+                drawInfo.hdcDraw,
+                bounds.left,
+                bounds.top,
+                static_cast<int>(width),
+                static_cast<int>(height),
+                frameDc,
+                0,
+                0,
+                SRCCOPY) != 0)
+        {
+            // The composed frame is already on the target, or it can be
+            // presented with the single blit above.
+            return S_OK;
+        }
+
+        // A blit between different devices (printer or metafile targets)
+        // can fail; compose the shifted frame straight on the target.
+        return _layerCache.ComposeShifted(
+                   drawInfo.hdcDraw,
+                   static_cast<int>(width),
+                   static_cast<int>(height))
+            ? S_OK
+            : E_FAIL;
     }
-    catch (const std::exception& exception)
+
+    // The cached frame still matches the view; presenting it skips the layer
+    // render entirely. The cache is invalidated on every view, layer, size,
+    // or backend change.
+    if (useCache &&
+        _layerCache.MatchesSize(
+            static_cast<int>(width),
+            static_cast<int>(height)))
     {
-        ::OutputDebugStringA(exception.what());
-        return E_FAIL;
+        if (::BitBlt(
+                drawInfo.hdcDraw,
+                bounds.left,
+                bounds.top,
+                static_cast<int>(width),
+                static_cast<int>(height),
+                _layerCache.Get(),
+                0,
+                0,
+                SRCCOPY) != 0)
+        {
+            return S_OK;
+        }
+
+        // A blit between different devices (printer or metafile targets)
+        // can fail; draw the frame straight to the target instead.
+        return renderFrame(drawInfo.hdcDraw, bounds);
     }
+
+    if (useCache)
+    {
+        // Render the layers into the cache so a following pan drag can
+        // reuse the frame, then present it.
+        const RECT sceneBounds{0, 0, static_cast<LONG>(width), static_cast<LONG>(height)};
+        const HRESULT result = renderFrame(_layerCache.Get(), sceneBounds);
+        if (FAILED(result))
+        {
+            return result;
+        }
+        _layerCache.MarkRendered();
+        if (::BitBlt(
+                drawInfo.hdcDraw,
+                bounds.left,
+                bounds.top,
+                static_cast<int>(width),
+                static_cast<int>(height),
+                _layerCache.Get(),
+                0,
+                0,
+                SRCCOPY) != 0)
+        {
+            return result;
+        }
+
+        // A blit between different devices (printer or metafile targets)
+        // can fail; draw the frame straight to the target instead.
+        return renderFrame(drawInfo.hdcDraw, bounds);
+    }
+
+    if (buffered)
+    {
+        const HRESULT result = renderFrame(frameDc, frameBounds);
+        if (FAILED(result))
+        {
+            return result;
+        }
+        if (::BitBlt(
+                drawInfo.hdcDraw,
+                bounds.left,
+                bounds.top,
+                static_cast<int>(width),
+                static_cast<int>(height),
+                frameDc,
+                0,
+                0,
+                SRCCOPY) != 0)
+        {
+            return result;
+        }
+
+        // A blit between different devices (printer or metafile targets)
+        // can fail; present the frame by drawing straight to the target.
+        frameDc = drawInfo.hdcDraw;
+        frameBounds = bounds;
+    }
+
+    return renderFrame(frameDc, frameBounds);
+}
+
+LRESULT CMapWinGISControl::OnEraseBkgnd(
+    UINT,
+    WPARAM,
+    LPARAM,
+    BOOL& handled)
+{
+    // OnDraw paints an opaque frame over the whole bounds, so erasing the
+    // background first would only flash the host's color through.
+    handled = TRUE;
+    return 1;
 }
 
 CMapWinGISControl::~CMapWinGISControl()
