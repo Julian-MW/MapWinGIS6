@@ -56,7 +56,9 @@
   <ItemGroup>
     <ClCompile Include="ActiveXActivationTests.cpp" />
     <ClCompile Include="ComConversionTests.cpp" />
+    <ClCompile Include="FrameBufferTests.cpp" />
     <ClCompile Include="GdalOperationDispatcherTests.cpp" />
+    <ClCompile Include="LayerCacheTests.cpp" />
     <ClCompile Include="..\MapWinGIS.Core.Tests\Main.cpp" />
     <ClCompile Include="RenderingBaselineTests.cpp" />
     <ClCompile Include="..\MapWinGIS.Core.Tests\TestData.cpp" />
